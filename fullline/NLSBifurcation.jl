@@ -66,7 +66,9 @@ export compute_wronskian, compute_s_minus, compute_s_plus,
        jost_plus, jost_minus,
        find_w_zeros_imag, find_s_minus_zeros_imag,
        find_s_minus_zeros_real, compute_scattering_data,
-       print_scattering_data
+       compute_all_scattering_data, print_scattering_data,
+       compute_w_zeros, compute_s_minus_zeros,
+       print_scattering_summary, find_threshold_alpha_qep
 
 export splitstep_evolve, run_dynamics, build_absorbing_layer,
        build_ic_groundstate, build_ic_perturbed_soliton, build_ic_gaussian,
