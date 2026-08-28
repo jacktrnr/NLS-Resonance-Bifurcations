@@ -77,7 +77,8 @@ export find_seeds_at_E, find_all_seeds, print_seed_table,
        filter_seeds, deduplicate_seeds,
        continue_from_seeds, continue_single_seed,
        find_branches_at_fixed_E, find_branches_over_Es,
-       find_all_branches_from_scattering
+       find_all_branches_from_scattering,
+       trace_complete_branches
 
 # Scattering theory
 export compute_w_zeros, compute_s_minus_zeros,

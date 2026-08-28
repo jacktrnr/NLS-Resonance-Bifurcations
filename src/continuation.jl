@@ -643,3 +643,287 @@ function _deduplicate_branches(branches, a, b, Vfun; N=5000, tol=0.05)
 
     return unique_branches
 end
+
+
+# ============================================================================
+# AUTOMATIC FOLD RECOVERY — trace complete branches through folds
+# ============================================================================
+
+"""
+    trace_complete_branches(a, b, Vfun;
+        E_list, N=6000, p_min=-10.0, max_steps=2000,
+        ds=0.003, dsmin=1e-6, dsmax=0.008, ζ_min=1e-4,
+        max_fold_recoveries=3, verbose=1, kwargs...)
+
+High-level continuation that automatically detects folds and continues
+past them. When PALC stalls (hits dsmin), the routine:
+
+1. Records the stall point (E_stall, ζ_stall, N_stall)
+2. Searches for seeds nearby at E = E_stall ± δ with both slope signs
+3. Finds the seed whose N matches N_stall (the continuation of the branch)
+4. Continues from that seed and appends the result
+
+Returns a vector of "complete branches" — each is a NamedTuple with:
+  Es::Vector{Float64}, Ns::Vector{Float64}, pieces::Vector (raw branch objects)
+"""
+function trace_complete_branches(a, b, Vfun;
+        E_list::Vector{Float64},
+        N::Int=6000, p_min::Real=-10.0, p_max::Real=-1e-5,
+        max_steps::Int=2000,
+        ds::Real=0.003, dsmin::Real=1e-6, dsmax::Real=0.008,
+        ζ_min::Real=1e-4, tol::Real=1e-5,
+        max_fold_recoveries::Int=3,
+        ζmax::Real=12.0, nscan::Int=4000,
+        verbose::Int=1)
+
+    println("\n" * "="^70)
+    println("TRACE COMPLETE BRANCHES (with fold recovery)")
+    println("="^70)
+
+    # Step 1: Find initial seeds
+    seeds = find_all_seeds(a, b, Vfun;
+        E_list=E_list, ζmax=ζmax, nscan=nscan, N=N, tolH=1e-7, slope_set=(+1, -1))
+    seeds = deduplicate_seeds(seeds; E_tol=0.02, c_tol=0.02)
+
+    if isempty(seeds)
+        println("  No seeds found!")
+        return []
+    end
+
+    # Step 2: Continue each seed, with fold recovery
+    complete_branches = []
+
+    for (idx, seed) in enumerate(seeds)
+        verbose > 0 && println("\n--- Branch from seed $idx (E=$(round(seed.p.E,digits=3)), slope=$(seed.slope_sign)) ---")
+
+        pieces_Es = Float64[]
+        pieces_Ns = Float64[]
+        raw_pieces = []
+        current_seed = seed
+        recovery_count = 0
+
+        while recovery_count ≤ max_fold_recoveries
+            # Continue current seed
+            br = _continue_one_seed(current_seed, a, b, Vfun;
+                N=N, p_min=p_min, p_max=p_max, max_steps=max_steps,
+                ds=ds, dsmin=dsmin, dsmax=dsmax, ζ_min=ζ_min, tol=tol, verbose=0)
+
+            if isempty(br.branch)
+                break
+            end
+
+            push!(raw_pieces, br)
+
+            # Compute N(E) for this piece
+            slope = current_seed.slope_sign
+            Es_piece, Ns_piece = _compute_branch_NE(br, slope, a, b, Vfun; N=N)
+
+            if isempty(Es_piece)
+                break
+            end
+
+            append!(pieces_Es, Es_piece)
+            append!(pieces_Ns, Ns_piece)
+
+            # Check termination: did the branch hit a fold (dsmin stall)?
+            Es_br = [sol.param for sol in br.branch]
+            E_end = Es_br[end]  # last point computed
+            ζ_end = br.branch[end].ζ
+
+            # Heuristic: if the branch endpoint is NOT at p_min, p_max, or ζ_min,
+            # then it stalled (fold or convergence issue)
+            at_pmin = abs(E_end - p_min) < 0.05
+            at_pmax = abs(E_end - p_max) < 0.01
+            at_ζmin = abs(ζ_end) < ζ_min * 2
+
+            if at_pmin || at_pmax || at_ζmin
+                # Natural termination — no fold recovery needed
+                verbose > 0 && @printf("  Piece %d: %d pts, E ∈ [%.3f, %.3f] (natural end)\n",
+                    recovery_count+1, length(br.branch), minimum(Es_br), maximum(Es_br))
+                break
+            end
+
+            # FOLD DETECTED — try to continue past it
+            recovery_count += 1
+            N_end = isempty(Ns_piece) ? NaN : Ns_piece[end]
+            verbose > 0 && @printf("  Piece %d: %d pts, E ∈ [%.3f, %.3f] → FOLD at E=%.3f, N=%.2f\n",
+                recovery_count, length(br.branch), minimum(Es_br), maximum(Es_br), E_end, N_end)
+            verbose > 0 && println("  Attempting fold recovery (#$recovery_count)...")
+
+            # Search for continuation seed near the fold
+            recovery_seed = _find_fold_continuation(a, b, Vfun, E_end, ζ_end, N_end, slope;
+                N=N, ζmax=ζmax, nscan=nscan)
+
+            if recovery_seed === nothing
+                verbose > 0 && println("  ✗ No continuation found past fold")
+                break
+            end
+
+            verbose > 0 && @printf("  ✓ Found continuation: E=%.3f, ζ=%.3f, slope=%+d\n",
+                recovery_seed.p.E, recovery_seed.ζ, recovery_seed.slope_sign)
+            current_seed = recovery_seed
+        end
+
+        if !isempty(pieces_Es)
+            push!(complete_branches, (; Es=pieces_Es, Ns=pieces_Ns, pieces=raw_pieces,
+                                        origin_seed=seed))
+            verbose > 0 && @printf("  COMPLETE: %d points, E ∈ [%.3f, %.3f], N ∈ [%.2f, %.2f]\n",
+                length(pieces_Es), minimum(pieces_Es), maximum(pieces_Es),
+                minimum(pieces_Ns), maximum(pieces_Ns))
+        end
+    end
+
+    # Deduplicate complete branches
+    complete_branches = _deduplicate_complete(complete_branches)
+
+    println("\n" * "="^70)
+    @printf("COMPLETE: %d distinct branches\n", length(complete_branches))
+    println("="^70)
+
+    return complete_branches
+end
+
+
+"""Continue a single seed (internal helper, no printing)."""
+function _continue_one_seed(seed, a, b, Vfun; N=6000, p_min=-10.0, p_max=-1e-5,
+        max_steps=2000, ds=0.003, dsmin=1e-6, dsmax=0.008, ζ_min=1e-4, tol=1e-5, verbose=0)
+
+    lensE = @optic _.E
+    slope = seed.slope_sign
+
+    F(ζ, p) = begin
+        Ev = typeof(p) <: Number ? p : p.E
+        return [H_residual_ζ(a, b, Ev, Vfun; ζ=ζ[1], slope_sign=slope, N=N)]
+    end
+
+    rec(ζ, p; k...) = begin
+        Ev = typeof(p) <: Number ? p : p.E
+        return (; ζ=ζ[1], c=c_from_ζ(ζ[1], Ev), slope_sign=slope)
+    end
+
+    prob = BifurcationProblem(F, [seed.ζ], seed.p, lensE; record_from_solution=rec)
+
+    opts = ContinuationPar(
+        ds=ds, dsmin=dsmin, dsmax=dsmax,
+        p_min=p_min, p_max=p_max, max_steps=max_steps,
+        newton_options=NewtonPar(tol=tol, max_iterations=30),
+        nev=1, detect_bifurcation=0)
+
+    last_br = Ref{Any}(nothing)
+    finalise_solution = (z, tau, step, contResult; k...) -> begin
+        last_br[] = contResult
+        any(isnan, z.u) && return false
+        step ≤ 1 && return true
+        abs(z.u[1]) ≤ ζ_min && return false
+        return true
+    end
+
+    br = try
+        continuation(prob, PALC(), opts; bothside=true, verbosity=verbose,
+                    finalise_solution=finalise_solution)
+    catch e
+        last_br[] !== nothing ? last_br[] : (; branch=[])
+    end
+
+    return br === nothing ? (; branch=[]) : br
+end
+
+
+"""Compute N(E) along a branch piece."""
+function _compute_branch_NE(br, slope, a, b, Vfun; N=5000, n_sample=150)
+    isempty(br.branch) && return Float64[], Float64[]
+    Es = Float64[]
+    Ns = Float64[]
+    step = max(1, div(length(br.branch), n_sample))
+    for j in 1:step:length(br.branch)
+        sol = br.branch[j]
+        c_val = c_from_ζ(sol.ζ, sol.param)
+        xs, us, vs = integrate_support(a, b, sol.param, Vfun; N=N, c=c_val, slope_sign=slope)
+        if !isempty(xs) && can_glue(sol.param, real(us[end]), real(vs[end]))
+            N_val = compute_norm(a, b, sol.param, xs, us, vs)
+            if isfinite(N_val) && N_val > 0
+                push!(Es, sol.param)
+                push!(Ns, N_val)
+            end
+        end
+    end
+    return Es, Ns
+end
+
+
+"""
+Search for a seed that continues the branch past a fold.
+At the fold, we look for seeds at nearby E with:
+  - Different slope_sign (the tail might flip)
+  - Same slope but very different ζ (the branch curves back)
+that produce a similar N value.
+"""
+function _find_fold_continuation(a, b, Vfun, E_fold, ζ_fold, N_fold, slope_fold;
+        N=6000, ζmax=15.0, nscan=4000)
+
+    # Search at energies slightly past the fold (in the direction the branch was going)
+    # and also slightly before (the branch might curve back)
+    δs = [0.02, 0.05, 0.1, -0.02, -0.05]
+    E_search = [E_fold + δ for δ in δs]
+    E_search = filter(e -> -10.0 < e < -0.005, E_search)
+
+    # Try both slopes
+    for slope_try in [slope_fold, -slope_fold]
+        seeds_try = find_all_seeds(a, b, Vfun;
+            E_list=E_search, ζmax=ζmax, nscan=nscan, N=N, tolH=1e-7,
+            slope_set=(slope_try,))
+
+        for s in seeds_try
+            # Skip if this is basically the same seed we came from
+            if abs(s.ζ - ζ_fold) < 0.5 && s.slope_sign == slope_fold
+                continue
+            end
+
+            # Check if this seed has a similar N value
+            E_s = s.p.E
+            c_s = s.c
+            xs, us, vs = integrate_support(a, b, E_s, Vfun; N=N, c=c_s, slope_sign=slope_try)
+            if isempty(xs) || !can_glue(E_s, real(us[end]), real(vs[end]))
+                continue
+            end
+            N_s = compute_norm(a, b, E_s, xs, us, vs)
+
+            # Match: N should be close to N_fold
+            if isfinite(N_s) && isfinite(N_fold) && abs(N_s - N_fold) < max(0.5, 0.1 * N_fold)
+                return s
+            end
+        end
+    end
+
+    return nothing  # no continuation found
+end
+
+
+"""Deduplicate complete branches by midpoint proximity."""
+function _deduplicate_complete(branches; tol=0.3)
+    isempty(branches) && return branches
+    unique = [branches[1]]
+    for br in branches[2:end]
+        isempty(br.Es) && continue
+        mid_idx = div(length(br.Es), 2)
+        E_mid, N_mid = br.Es[mid_idx], br.Ns[mid_idx]
+
+        is_dup = false
+        for ubr in unique
+            isempty(ubr.Es) && continue
+            dists = [sqrt((E_mid - ubr.Es[j])^2 + (N_mid - ubr.Ns[j])^2) for j in 1:length(ubr.Es)]
+            if minimum(dists) < tol
+                # Keep the longer one
+                if length(br.Es) > length(ubr.Es)
+                    # Replace
+                    idx = findfirst(x -> x === ubr, unique)
+                    unique[idx] = br
+                end
+                is_dup = true
+                break
+            end
+        end
+        !is_dup && push!(unique, br)
+    end
+    return unique
+end
