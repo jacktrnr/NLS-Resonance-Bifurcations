@@ -1,22 +1,21 @@
 # NLSBifurcations.jl
 
 Numerical code for **"Resonance-induced nonlinear bound states"**  
-*J. C. Turner and M. I. Weinstein, Nonlinearity (2026)*  
+J. C. Turner and M. I. Weinstein, *Nonlinearity* (2026)  
 DOI: [10.1088/1361-6544/ae9de1](https://doi.org/10.1088/1361-6544/ae9de1)
 
----
+## Overview
 
-## Bifurcation diagrams
+Computes nonlinear bound states of the focusing 1D NLS/GP equation
 
-Nonlinear bound state branches $\mathcal{N}[\psi_E]$ vs $E$ for the symmetric square well $V(x) = -\alpha\,\chi_{[-1,1]}(x)$ at three depths relative to the threshold $\alpha_\star = \pi^2/4$:
+$$-\psi'' + V(x)\psi - |\psi|^2\psi = E\psi$$
 
-| $\alpha < \alpha_\star$ | $\alpha = \alpha_\star$ | $\alpha > \alpha_\star$ |
-|:---:|:---:|:---:|
-| ![](docs/figures/figure9a.png) | ![](docs/figures/figure9b.png) | ![](docs/figures/figure9c.png) |
+with compactly supported potentials, and their connection to the linear scattering data of $H_V = -\partial_x^2 + V$.
 
-Green markers: bifurcation energies predicted by the linear scattering data. Branches arising from **scattering resonance poles** exhibit a strictly positive $L^2$ threshold; branches from **bound state poles** start at $\mathcal{N} = 0$.
-
----
+The code:
+1. Finds **bound state poles** and **scattering resonance poles** (zeros of $w(k)$) and **transmission resonances** (zeros of $s_-(k)$) via quadratic eigenvalue problems
+2. Traces **nonlinear bifurcation branches** $\mathcal{N}[\psi_E]$ vs $E$ using pseudo-arclength continuation, with automatic fold detection and recovery
+3. Verifies the **asymptotic predictions** of the paper (threshold convergence rates, Theorem 4.4)
 
 ## Installation
 
@@ -38,88 +37,63 @@ julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```julia
 using NLSBifurcations
 
-# Define a potential
+# Define a potential on [-1, 1]
 a, b = -1.0, 1.0
 Vfun = square_well(a, b, -2.0)
 
-# Compute scattering data (poles and transmission zeros)
+# Compute linear scattering data
 scat = compute_all_scattering_data(a, b, Vfun; N=500, k_max=4.0)
-print_scattering_summary(scat)
 
-# Find nonlinear bound state branches
-seeds = find_all_seeds(a, b, Vfun; E_list=[-0.5, -1.0], ζmax=10.0, nscan=4000)
-branches = continue_from_seeds(seeds, a, b, Vfun; N=5000, p_min=-4.0)
-
-# Or use the scattering data to discover all branches automatically
-branches, scat = find_all_branches_from_scattering(a, b, Vfun)
+# Trace complete nonlinear branches (automatic fold recovery)
+branches = trace_complete_branches(a, b, Vfun;
+    E_list=[-0.3, -0.8, -1.3], p_min=-4.0)
 ```
 
 ### Paper potential (eq 5.1)
 
 ```julia
-# Symmetric (Figure 7): β = 0
-V = paper_potential(3.0, 0.0)
-
-# Asymmetric (Figure 10): β = -11
-V = paper_potential(24.0, -11.0)
-
-# Find threshold depth
-α_star = find_threshold_alpha_qep(0.0)  # symmetric case
+V = paper_potential(3.0, 0.0)     # Symmetric (Figure 7)
+V = paper_potential(24.0, -11.0)  # Asymmetric (Figure 10)
 ```
 
 ## Reproducing paper results
-
-Scripts in `examples/` map directly to the paper:
 
 | Script | Paper result |
 |--------|-------------|
 | `examples/table1.jl` | Table 1 — threshold resonance asymptotics |
 | `examples/figure9.jl` | Figure 9 — square well bifurcation diagrams |
-| `examples/figure9_scattering.jl` | Figure 9 left panels — scattering data |
+| `examples/figure9_complete.jl` | Figure 9(a) — complete branch topology with fold |
 
 ```bash
-julia --project=. examples/figure9.jl
+julia --project=. examples/table1.jl
 ```
+
+## Methods
+
+**Scattering data** — Discretize $-\psi'' + V\psi = k^2\psi$ on $[a,b]$ with ghost-point elimination of the Robin BCs ($\psi' = \pm ik\psi$). Outgoing BCs give zeros of $w(k)$; transmission BCs give zeros of $s_-(k)$. Both yield quadratic eigenvalue problems $(A + ikB)\psi = k^2\psi$, linearized to $2N \times 2N$ companion matrices.
+
+**Nonlinear continuation** — Bound states are found by shooting with the $\zeta$-parametrized initial amplitude $c = \sqrt{-2E}\tanh\zeta$, matching to soliton tails via the Hamiltonian residual. Branches are continued in $E$ using PALC (BifurcationKit.jl). When the continuation stalls at a fold, the code automatically searches for seeds nearby and continues past it.
+
+**Verification** — Theorem 4.4 predictions ($E(\varepsilon)/\varepsilon \to -\frac{1}{2}U_\star(b)^2$, $x_R(\varepsilon) \to$ finite limit) are confirmed numerically in `examples/table1.jl`.
 
 ## Package structure
 
 ```
 src/
   NLSBifurcations.jl   Main module
-  potentials.jl         15+ compactly supported potentials + paper_potential(α,β)
-  scattering.jl         QEP for w(k) and s₋(k) zeros (ghost-point FD + companion)
-  shooting.jl           ODE integration with ζ-parametrization
-  continuation.jl       Seed finding + BifurcationKit PALC + scattering-informed discovery
+  scattering.jl         QEP for w(k) and s₋(k) zeros
+  potentials.jl         Compactly supported potentials + paper_potential(α,β)
+  continuation.jl       Seed finding, PALC continuation, fold recovery
+  shooting.jl           ODE integration
   glue.jl               Soliton tail matching
   spectral.jl           L₊/L₋ stability operators
   dynamics.jl           Split-step time evolution
-  plots.jl              Visualization
 
 examples/              Paper reproduction scripts
 halfline/              Half-line code (Dirichlet BC, used for Table 1)
-docs/figures/          Generated figures
+test/                  Package tests
 ```
-
-## Methods
-
-**Scattering data** — The eigenvalue problems for $w(k) = 0$ (outgoing BCs: $\psi'(a) = -ik\psi(a)$, $\psi'(b) = ik\psi(b)$) and $s_-(k) = 0$ (transmission BCs: $\psi'(a) = ik\psi(a)$, $\psi'(b) = ik\psi(b)$) are discretized on $[a,b]$ with ghost-point elimination, yielding quadratic eigenvalue problems $(A + ikB)\psi = k^2\psi$ linearized to $2N \times 2N$ companion matrices.
-
-**Nonlinear continuation** — Bound states are found by shooting through the potential with the $\zeta$-parametrized initial amplitude $c = \sqrt{-2E}\tanh\zeta$, matching to soliton tails via the Hamiltonian residual. Branches are continued in $E$ using pseudo-arclength continuation ([BifurcationKit.jl](https://github.com/bifurcationkit/BifurcationKit.jl)).
-
-**Verification** — Theorem 4.4 predictions ($E(\varepsilon)/\varepsilon \to -\frac{1}{2}U_\star(b)^2$, $x_R(\varepsilon) \to$ finite limit) are confirmed numerically in `examples/table1.jl`.
 
 ## License
 
 MIT
-
-## Citation
-
-```bibtex
-@article{TurnerWeinstein2026,
-  author  = {Turner, Jackson C and Weinstein, Michael I},
-  title   = {Resonance-induced nonlinear bound states},
-  journal = {Nonlinearity},
-  year    = {2026},
-  doi     = {10.1088/1361-6544/ae9de1}
-}
-```
