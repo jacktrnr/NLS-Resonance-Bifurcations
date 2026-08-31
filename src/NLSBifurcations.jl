@@ -16,8 +16,10 @@ module NLSBifurcations
 using OrdinaryDiffEq
 using OrdinaryDiffEq.SciMLBase: ReturnCode
 using LinearAlgebra
+using SparseArrays
 using Printf
 using FFTW
+using JLD2
 using Plots
 using LaTeXStrings
 using Colors
@@ -51,6 +53,12 @@ include("dynamics.jl")
 
 # Plotting
 include("plots.jl")
+
+# ─── Stability analysis (from NLSResonanceStability) ──────────────────────────
+# Evans function spectral diagnostics and stability continuation
+include("wells.jl")
+include("lplus.jl")
+include("jl_evans.jl")
 
 # ─── Exports ───────────────────────────────────────────────────────────────────
 
@@ -97,5 +105,13 @@ export splitstep_evolve, run_dynamics, build_absorbing_layer,
 export set_plot_style!,
        plot_mass_energy, plot_branch_profiles, plot_potential,
        plot_spectrum_evolution, plot_stability_diagram
+
+# Stability (Evans function, Poeschl-Teller)
+export build_Lplus_evans_full, compute_Lplus_spectrum_evans_full
+
+# Potentials (from wells.jl — stability paper)
+export cosine_arch, sine_arch, antisymmetric_sine, sech2_arch,
+       smooth_tapered_well, smooth_double_arch, smooth_step,
+       boundary_dipole, interior_dipole
 
 end # module
